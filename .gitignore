@@ -1,0 +1,140 @@
+# .gitignore for IDC_RIOP - general, cross-platform, and common tool ignores
+
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+Icon?
+
+# Model results
+*.out
+*.json
+*.png
+*.pth
+
+# Logs and databases
+*.log
+*.sql
+*.sqlite
+*.db
+*.csv
+*.parquet
+*.pkl
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp.*
+.cache/
+dist/
+build/
+coverage/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+.egg/
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Java / Maven / Gradle
+target/
+build/
+out/
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+
+# .NET
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+
+# PHP / Composer
+/vendor/
+composer.lock
+
+# Ruby
+*.gem
+.bundle/
+vendor/bundle/
+.rvmrc
+
+# Go
+bin/
+vendor/
+*.exe
+
+# IDEs and editors
+.vscode/
+*.code-workspace
+.idea/
+*.iml
+*.ipr
+*.iws
+*.sublime-workspace
+*.sublime-project
+
+# Containers / virtualization
+.vagrant/
+docker-compose.override.yml
+*.log
+docker-compose.*.yml
+
+# Terraform
+.terraform/
+terraform.tfstate
+terraform.tfstate.backup
+*.tfvars
+crash.log
+
+# Secrets and environment
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.crt
+secrets.*
+credentials.*
+
+# Build artifacts / packages
+dist/
+release/
+*.tgz
+*.zip
+
+# Coverage, reports and analysis
+coverage/
+*.lcov
+reports/
+
+# Misc
+__MACOSX/
+*.DS_Store
+
+# If you add language/tool-specific folders or files, add them below.
