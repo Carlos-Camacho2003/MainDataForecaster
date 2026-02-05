@@ -150,7 +150,7 @@ def run_data_preparation(machine: str, aggregation: str = "mean") -> bool:
         prepare_all_data_for_machine(machine, aggregation=aggregation)
         return True
     except Exception as e:
-        print(f"  ❌ Data preparation failed: {str(e)}")
+        print(f"  [ERROR] Data preparation failed: {str(e)}")
         return False
 
 
@@ -197,25 +197,27 @@ def run_batch_training(
         return n_failed == 0
         
     except Exception as e:
-        print(f"  ❌ Training failed: {str(e)}")
+        print(f"  [ERROR] Training failed: {str(e)}")
         return False
 
 
-def run_batch_forecast(horizon: str = "2_days") -> bool:
+def run_batch_forecast(horizon: str = "2_days", machine: str = "ALL") -> bool:
     """Run batch forecast for all machines."""
     from nbeats.nbeats_forecast import batch_forecast_to_data
     
     print(f"\n{'='*70}")
-    print(f"FORECASTING: All Machines")
+    print(f"FORECASTING: {machine}")
     print(f"{'='*70}")
     print(f"  Horizon: {horizon}")
     print(f"{'='*70}\n")
     
     try:
-        batch_forecast_to_data(horizon_preset=horizon)
+        batch_forecast_to_data(horizon_preset=horizon, machine=machine)
         return True
     except Exception as e:
-        print(f"  ❌ Forecasting failed: {str(e)}")
+        print(f"  [ERROR] Forecasting failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -357,7 +359,7 @@ Examples:
         print("PHASE 2: FORECASTING")
         print("="*70)
         
-        success = run_batch_forecast(horizon=args.horizon)
+        success = run_batch_forecast(horizon=args.horizon, machine=args.machine)
         if not success:
             print("[WARN] Forecasting had errors")
     else:

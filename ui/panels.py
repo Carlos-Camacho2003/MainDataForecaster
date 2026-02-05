@@ -698,6 +698,24 @@ class ForecastPanel(BasePanel):
                 sys.path.insert(0, str(project_root))
                 os.chdir(project_root)
                 
+                ### DISABLING PERFORMANCE PIPELINE FOR NOW
+                # # --- NEW: Run Performance Pipeline First ---
+                # self.log("Actualizando indicadores y consolidando datos...", "info")
+                # try:
+                #     from performance.run_performance_pipeline import PerformancePipeline
+                    
+                #     pipeline = PerformancePipeline(base_dir=project_root)
+                #     # We capture stdout/stderr implicitly via the log console if it redirects,
+                #     # but here we just run it. The pipeline prints to stdout.
+                #     # Since we are in a GUI, those prints might not show in the log panel unless redirected.
+                #     # Ideally we trust the pipeline to run.
+                #     pipeline.run_full_pipeline()
+                #     self.log("✅ Datos actualizados correctamente", "success")
+                # except Exception as e:
+                #     self.log(f"⚠️ Error actualizando datos: {e}", "warning")
+                #     self.log("Intentando continuar con datos existentes...", "warning")
+                # -------------------------------------------
+                
                 from nbeats.nbeats_forecast import batch_forecast_to_data
                 from nbeats.nbeats_train import prepare_all_data_for_machine
                 
@@ -731,12 +749,12 @@ class ForecastPanel(BasePanel):
                 self.log("", "info")
                 
                 # PHASE 0: Data Preparation
-                self.log("Preparando datos más recientes...", "info")
+                self.log("Preparando datos para pronóstico...", "info")
                 
                 machines_to_prep = []
                 if machine == "ALL":
-                    machines_to_prep = ["DESF", "PICADORA"]
-                elif machine in ["DESF", "PICADORA"]:
+                    machines_to_prep = ["DESF", "PICADORA", "PLANT"]
+                elif machine in ["DESF", "PICADORA", "PLANT"]:
                     machines_to_prep = [machine]
                 
                 for m in machines_to_prep:

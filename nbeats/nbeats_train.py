@@ -515,9 +515,9 @@ def get_machine_variables(machine: str) -> dict:
             ]
         },
         'PLANT': {
-            'data_file': None,  # PLANT only has EPI
+            'data_file': 'data/epi/PLANT/DATOS_EPI_PLANT_HOURLY.csv',
             'epi_file': 'data/epi/PLANT/DATOS_EPI_PLANT_HOURLY.csv',
-            'variables': []
+            'variables': ['EPI']
         }
     }
     return configs.get(machine.upper(), {'data_file': None, 'epi_file': None, 'variables': []})
@@ -593,6 +593,92 @@ def consolidate_machine_data(machine: str) -> Optional[str]:
     return str(output_path)
 
 
+def consolidate_epi_data(machine: str) -> Optional[str]:
+    """
+    Consolidate downloaded EPI CSV files for a machine into a single file.
+    
+    Args:
+        machine: Machine name ('DESF', 'PICADORA', 'PLANT')
+        
+    Returns:
+        Path to consolidated CSV file, or None if no files found
+    """
+    import pandas as pd
+    from pathlib import Path
+    
+    machine = machine.upper()
+    base_dir = Path("data/epi") / machine
+    
+    if not base_dir.exists():
+        if machine != 'PLANT': # PLANT might strictly rely on this, others might have raw data
+             print(f"  [WARN] EPI directory not found: {base_dir}")
+        return None
+        
+    # Find all CSV files matching the download pattern
+    # Exclude the "final" consolidated file to avoid self-inclusion loop
+    # Pattern: *_performance_*.csv (e.g., desfibradora_performance_20260202.csv)
+    all_csvs = list(base_dir.glob("*.csv"))
+    epi_files = []
+    
+    consolidated_name = f"DATOS_EPI_{machine}_HOURLY.csv"
+    
+    for f in all_csvs:
+        # Filter out the target file itself and other non-performance files
+        if f.name == consolidated_name:
+            continue
+        if "_performance_" in f.name:
+            epi_files.append(f)
+            
+    if not epi_files:
+        # If no partial files found, check if the main file exists (maybe manually placed)
+        main_file = base_dir / consolidated_name
+        if main_file.exists():
+            return str(main_file)
+        return None
+        
+    print(f"  Found {len(epi_files)} EPI data files in {base_dir}")
+    
+    dfs = []
+    for file_path in sorted(epi_files):
+        try:
+            df = pd.read_csv(file_path)
+            # Ensure required columns
+            if 'timestamp' not in df.columns or 'y' not in df.columns:
+                # Check for alternative names if needed, but spec says 'timestamp,y'
+                # Maybe 'EPI' column?
+                if 'EPI' in df.columns:
+                     df = df.rename(columns={'EPI': 'y'})
+                
+            if 'timestamp' in df.columns and 'y' in df.columns:
+                dfs.append(df[['timestamp', 'y']])
+            else:
+                print(f"    [WARN] Skipping {file_path.name}: missing columns")
+        except Exception as e:
+            print(f"    [WARN] Error reading {file_path.name}: {e}")
+            
+    if not dfs:
+        return None
+        
+    # Concatenate
+    df_combined = pd.concat(dfs, ignore_index=True)
+    
+    # Handle timestamp normalization (mixed timezones in downloads)
+    # Convert to UTC
+    df_combined['timestamp'] = pd.to_datetime(df_combined['timestamp'], utc=True)
+    
+    # Sort and Deduplicate
+    # usage: 'last' keeps the most recent download/record for that timestamp
+    df_combined = df_combined.sort_values('timestamp')
+    df_combined = df_combined.drop_duplicates(subset=['timestamp'], keep='last')
+    
+    # Save to standard EPI file location
+    output_path = base_dir / consolidated_name
+    df_combined.to_csv(output_path, index=False)
+    print(f"  Consolidated EPI data saved to: {output_path} ({len(df_combined)} rows)")
+    
+    return str(output_path)
+
+
 def prepare_all_data_for_machine(
     machine: str,
     aggregation: str = "mean",
@@ -646,13 +732,36 @@ def prepare_all_data_for_machine(
         except Exception as e:
             print(f"  [ERROR] Could not read data file {config['data_file']}: {e}")
     
-    # Add EPI if requested
+    # Consolidate EPI data if requested
+    if include_epi:
+        print(f"  [EPI] Consolidating downloaded files...")
+        consolidated_epi = consolidate_epi_data(machine)
+        if consolidated_epi:
+            print(f"  [EPI] Using consolidated data: {consolidated_epi}")
+            config['epi_file'] = consolidated_epi
+    
+    # Prepare EPI data first if this machine has EPI
     if include_epi and config['epi_file'] and Path(config['epi_file']).exists():
-        variables_to_process.append({
-            'name': 'EPI',
-            'source': 'epi',
-            'data_file': config['epi_file']
-        })
+        print(f"  [EPI] Preparing EPI data...")
+        epi_parquet = prepare_epi_data(machine, config['epi_file'], aggregation)
+        if epi_parquet:
+            print(f"  [EPI] Prepared: {epi_parquet}")
+    
+    # Add EPI if requested (use parquet if available)
+    if include_epi and config['epi_file'] and Path(config['epi_file']).exists():
+        epi_parquet_path = Path('processed') / machine / 'EPI.parquet'
+        if epi_parquet_path.exists():
+            variables_to_process.append({
+                'name': 'EPI',
+                'source': 'epi',
+                'data_file': str(epi_parquet_path)
+            })
+        else:
+            variables_to_process.append({
+                'name': 'EPI',
+                'source': 'epi',
+                'data_file': config['epi_file']
+            })
     
     total_vars = len(variables_to_process)
     print(f"  Variables to process: {total_vars}")
@@ -745,6 +854,14 @@ def batch_train_machine(
     if consolidated_file:
         print(f"  Using consolidated data: {consolidated_file}")
         config['data_file'] = consolidated_file
+        
+    # Consolidate EPI data if requested
+    if include_epi:
+        print(f"  [EPI] Consolidating downloaded files...")
+        consolidated_epi = consolidate_epi_data(machine)
+        if consolidated_epi:
+            print(f"  [EPI] Using consolidated data: {consolidated_epi}")
+            config['epi_file'] = consolidated_epi
     
     results = {
         'machine': machine,
@@ -776,13 +893,28 @@ def batch_train_machine(
             else:
                 print(f"  [WARN] Variable '{var}' not found in data file, skipping")
     
-    # Add EPI if requested
+    # Prepare EPI data first if requested (creates parquet for unified workflow)
     if include_epi and config['epi_file'] and Path(config['epi_file']).exists():
-        variables_to_train.append({
-            'name': 'EPI',
-            'source': 'epi',
-            'data_file': config['epi_file']
-        })
+        print(f"  [EPI] Preparing EPI data...")
+        epi_parquet = prepare_epi_data(machine, config['epi_file'], aggregation)
+        if epi_parquet:
+            print(f"  [EPI] Prepared: {epi_parquet}")
+    
+    # Add EPI if requested (use parquet if available)
+    if include_epi and config['epi_file'] and Path(config['epi_file']).exists():
+        epi_parquet_path = Path('processed') / machine / 'EPI.parquet'
+        if epi_parquet_path.exists():
+            variables_to_train.append({
+                'name': 'EPI',
+                'source': 'epi',
+                'data_file': str(epi_parquet_path)
+            })
+        else:
+            variables_to_train.append({
+                'name': 'EPI',
+                'source': 'epi',
+                'data_file': config['epi_file']
+            })
     
     total_vars = len(variables_to_train)
     print(f"  Variables to train: {total_vars}")
@@ -813,8 +945,12 @@ def batch_train_machine(
                     continue
                 train_data_path = prepared_data
             else:
-                # EPI data is already prepared
-                train_data_path = data_file
+                # EPI: use parquet if available, otherwise CSV
+                epi_parquet_path = Path('processed') / machine / 'EPI.parquet'
+                if epi_parquet_path.exists():
+                    train_data_path = str(epi_parquet_path)
+                else:
+                    train_data_path = data_file
         except Exception as e:
             print(f"      [FAIL] Error preparing data for {var_name}: {str(e)}")
             results['failed'].append({'name': var_name, 'error': str(e)})
@@ -957,6 +1093,90 @@ def prepare_variable_data(
         
     except Exception as e:
         print(f"        Error preparing data: {str(e)}")
+        return None
+
+
+def prepare_epi_data(
+    machine: str,
+    source_file: str,
+    aggregation: str = "mean"
+) -> Optional[str]:
+    """
+    Prepare hourly aggregated EPI data for training.
+    
+    Args:
+        machine: Machine type ('PLANT', 'DESF', 'PICADORA')
+        source_file: Path to source CSV with EPI data
+        aggregation: Aggregation method ('mean' or 'max')
+    
+    Returns:
+        Path to prepared EPI.parquet file, or None if failed
+    """
+    import pandas as pd
+    from pathlib import Path
+    
+    try:
+        df = pd.read_csv(source_file)
+        
+        # Find timestamp column
+        ts_col = None
+        for col in ['timestamp', 'timestamp_grid', 'Timestamp']:
+            if col in df.columns:
+                ts_col = col
+                break
+        
+        if ts_col is None:
+            print(f"        No timestamp column found in {source_file}")
+            return None
+        
+        # Parse timestamp and set index
+        df[ts_col] = pd.to_datetime(df[ts_col], errors='coerce')
+        df = df.dropna(subset=[ts_col])
+        df = df.set_index(ts_col)
+        
+        # Find EPI column (case-insensitive, also check for 'y')
+        epi_col = None
+        for col in df.columns:
+            if col.lower() in ['epi', 'y']:
+                epi_col = col
+                break
+        
+        if epi_col is None:
+            print(f"        'EPI' or 'y' column not found in {source_file}")
+            return None
+        
+        # Resample to hourly
+        agg_method = aggregation.lower()
+        if agg_method == 'max':
+            series = df[epi_col].resample('1h').max()
+        else:
+            series = df[epi_col].resample('1h').mean()
+        series = series.dropna()
+        
+        print(f"        Aggregation: {agg_method.upper()}")
+        
+        if len(series) < 200:
+            print(f"        Insufficient data: only {len(series)} hourly samples")
+            return None
+        
+        # Create training dataframe
+        train_df = pd.DataFrame({
+            'timestamp': series.index,
+            'y': series.values
+        })
+        
+        # Save to processed folder
+        processed_dir = Path('processed') / machine.upper()
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        
+        out_path = processed_dir / "EPI.parquet"
+        train_df.to_parquet(out_path, index=False)
+        
+        print(f"        Prepared {len(train_df)} samples -> {out_path}")
+        return str(out_path)
+        
+    except Exception as e:
+        print(f"        Error preparing EPI data: {str(e)}")
         return None
 
 

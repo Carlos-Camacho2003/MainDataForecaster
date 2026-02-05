@@ -26,13 +26,14 @@ Usage:
 
 from __future__ import annotations
 import argparse
+import sys
 import json
-import random
+import warnings
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple
-
-import numpy as np
+from typing import Optional, Dict, Tuple, List
+from datetime import datetime
 import pandas as pd
+import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -638,6 +639,22 @@ def forecast_nbeats(
     with open(out_summary, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
     
+    # --- VISUALS CLEANUP & TIMESTAMPING ---
+    visual_timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    base_visual_name = f"{target_name}_nbeats_forecast{horizon_suffix}"
+    
+    # Cleanup old visuals
+    print(f"  [CLEAN] Cleaning up old visuals matching '{base_visual_name}*'...")
+    for f in outdir_path.glob(f"{base_visual_name}*.png"):
+        try:
+            f.unlink()
+            print(f"    [DEL] {f.name}")
+        except Exception as e:
+            print(f"    [ERR] Could not delete {f.name}: {e}")
+            
+    visual_path = outdir_path / f"{base_visual_name}_{visual_timestamp}.png"
+    # --------------------------------------
+
     # Create enhanced visualization
     create_extended_visualization(
         timestamps=timestamps,
@@ -652,7 +669,7 @@ def forecast_nbeats(
         unidad=unidad,
         target_name=target_name,
         horizon_config=horizon_config,
-        output_path=outdir_path / f"{target_name}_nbeats_forecast{horizon_suffix}.png"
+        output_path=visual_path
     )
     
     # Print results
@@ -661,7 +678,7 @@ def forecast_nbeats(
         summary=summary,
         horizon_config=horizon_config,
         out_csv=out_csv,
-        out_png=outdir_path / f"{target_name}_nbeats_forecast{horizon_suffix}.png",
+        out_png=visual_path,
         out_summary=out_summary
     )
     
@@ -992,12 +1009,12 @@ def batch_forecast_to_data(
         # Find all N-BEATS models for this machine
         models_subdir = config["models_subdir"]
         if not models_subdir.exists():
-            print(f"  ⚠️  Models directory not found: {models_subdir}")
+            print(f"  [WARN] Models directory not found: {models_subdir}")
             continue
         
         model_files = list(models_subdir.glob("*_nbeats.pth"))
         if not model_files:
-            print(f"  ⚠️  No trained models found in {models_subdir}")
+            print(f"  [WARN] No trained models found in {models_subdir}")
             continue
         
         print(f"  Found {len(model_files)} model(s): {[m.stem.replace('_nbeats', '') for m in model_files]}")
@@ -1063,16 +1080,90 @@ def batch_forecast_to_data(
                 continue
         
         if not all_forecasts:
-            print(f"  ⚠️  No successful forecasts for {machine_name}")
+            print(f"  [WARN] No successful forecasts for {machine_name}")
             continue
         
         # Merge all forecasts on timestamp
         combined_df = all_forecasts[0]
+        
+        # Identify the "master" timestamp reference (usually the one with latest data)
+        # Sort by last timestamp to find the most "current" forecast
+        all_forecasts.sort(key=lambda x: x["timestamp"].max(), reverse=True)
+        master_df = all_forecasts[0]
+        master_max_ts = master_df["timestamp"].max()
+        master_len = len(master_df)
+        
+        combined_df = master_df.copy()
+        
         for df in all_forecasts[1:]:
-            combined_df = combined_df.merge(df, on="timestamp", how="outer")
+            # Check if this dataframe is "stale" (max timestamp significantly older than master)
+            df_max_ts = df["timestamp"].max()
+            
+            # Ensure TZ awareness consistency for comparison
+            if master_max_ts.tzinfo is not None and df_max_ts.tzinfo is None:
+                df_max_ts = df_max_ts.tz_localize(master_max_ts.tzinfo)
+            elif master_max_ts.tzinfo is None and df_max_ts.tzinfo is not None:
+                df_max_ts = df_max_ts.tz_localize(None)
+            
+            delta = master_max_ts - df_max_ts
+            is_stale = delta > pd.Timedelta(days=30)
+            
+            # print(f"    DEBUG: MasterMax={master_max_ts}, DFMax={df_max_ts}, Delta={delta}, Stale={is_stale}")
+            
+            if is_stale:
+                print(f"    [WARN] Detected stale forecast for variables in this dataframe (Max TS: {df_max_ts})")
+                print(f"    Time delta: {delta}")
+                print(f"    Aligning timestamps to match master forecast...")
+                
+                # Create a copy to modify
+                df_aligned = df.copy()
+                
+                # Simply replace the timestamp column with master's timestamp
+                # Requires equal length or ensuring alignment
+                if len(df_aligned) == master_len:
+                    df_aligned["timestamp"] = master_df["timestamp"]
+                else:
+                    # Truncate or pad
+                    print(f"    [WARN] Length Mismatch! DF={len(df_aligned)}, Master={master_len}")
+                    min_len = min(len(df_aligned), master_len)
+                    df_aligned = df_aligned.iloc[:min_len]
+                    df_aligned["timestamp"] = master_df["timestamp"].iloc[:min_len]
+                
+                combined_df = combined_df.merge(df_aligned, on="timestamp", how="outer")
+            else:
+                combined_df = combined_df.merge(df, on="timestamp", how="outer")
         
         # Sort by timestamp
         combined_df = combined_df.sort_values("timestamp").reset_index(drop=True)
+        
+        # --- NEW: Filter Stale Forecasts ---
+        # If there is a significant gap in data (e.g., stale EPI data vs new sensor data),
+        # we want to show only the forecasts relevant to the CURRENT time (latest data).
+        if not combined_df.empty:
+            max_ts = combined_df["timestamp"].max()
+            
+            # Define a window to look back from the max timestamp.
+            # If our horizon is 2 days, we definitely don't need data from 48 days ago.
+            # We add a small buffer (e.g., 5 days) to give context, but drop the very old stuff.
+            # This fixes the "jump" issue when EPI data is month(s) old.
+            
+            # Determine appropriate lookback based on horizon
+            # Default buffer: 7 days context
+            days_buffer = 7
+            if horizon_preset == "15_days":
+                days_buffer = 20
+            elif horizon_preset == "1_month":
+                days_buffer = 40
+                
+            cutoff_date = max_ts - pd.Timedelta(days=days_buffer)
+            
+            original_len = len(combined_df)
+            combined_df = combined_df[combined_df["timestamp"] >= cutoff_date]
+            
+            if len(combined_df) < original_len:
+                print(f"  Start date filter: {cutoff_date}")
+                print(f"  Filtered {original_len - len(combined_df)} stale forecast rows (kept last {days_buffer} days)")
+        # -----------------------------------
         
         # Save to data folder
         output_file = config["output_file"]
@@ -1085,67 +1176,78 @@ def batch_forecast_to_data(
         print(f"     Directorio: {output_file.parent}")
         print(f"     Existe directorio: {output_file.parent.exists()}")
         
+        # Create machine-specific output (filtering columns if needed)
+        final_df = combined_df.copy()
+        
+        if machine_name == "PLANT":
+            # For PLANT, assume user only wants Timestamp + EPI columns
+            # Look for columns starting with DATOS_EPI_PLANT
+            keep_cols = ["timestamp"]
+            for col in final_df.columns:
+                if "DATOS_EPI_PLANT" in col:
+                    keep_cols.append(col)
+            
+            # Reorder nicely
+            # Priority: forecast, lower_ci, upper_ci
+            epi_forecast = [c for c in keep_cols if "_forecast" in c]
+            epi_ci = [c for c in keep_cols if "_ci" in c]
+            sorted_cols = ["timestamp"] + sorted(epi_forecast) + sorted(epi_ci)
+            
+            # Only keep these
+            final_df = final_df[sorted_cols]
+            print(f"  PLANT format enforcement: Kept {len(sorted_cols)} columns")
+
         try:
-            combined_df.to_csv(output_file, index=False)
+            final_df.to_csv(output_file, index=False)
             
             # Verify file was written
             if output_file.exists():
                 file_size = output_file.stat().st_size
-                print(f"  ✅ Archivo guardado exitosamente")
+                print(f"  [OK] Archivo guardado exitosamente")
                 print(f"     Ruta: {output_file}")
                 print(f"     Tamaño: {file_size / 1024:.1f} KB")
-                print(f"     Shape: {combined_df.shape}")
+                print(f"     Shape: {final_df.shape}")
                 print(f"     Variables: {len(all_forecasts)}")
                 print(f"     Horizon: {horizon_preset}")
                 output_files[machine_name] = output_file
             else:
-                print(f"  ❌ ERROR: Archivo no existe después de guardar!")
+                print(f"  [ERROR] Archivo no existe después de guardar!")
                 print(f"     Ruta esperada: {output_file}")
         except PermissionError as e:
-            print(f"  ❌ ERROR DE PERMISOS: {e}")
+            print(f"  [ERROR] DE PERMISOS: {e}")
             print(f"     El archivo puede estar abierto en otro programa")
         except Exception as e:
-            print(f"  ❌ ERROR al guardar: {e}")
+            print(f"  [ERROR] al guardar: {e}")
             import traceback
             traceback.print_exc()
 
-        # Cleanup: Delete individual variable forecast CSVs
-        # Keep only:
-        # 1. The combined summary: output_file (FORECAST_{MACHINE}_{HORIZON}.csv)
-        # 2. The EPI forecast: DATOS_EPI_{MACHINE}_...
-        print(f"\n  🧹 Limpiando archivos individuales...")
+        # Cleanup: Delete ALL other CSV files in this folder to prevent clutter
+        # We only want to keep the single "latest" forecast file for this machine
+        print(f"\n  [CLEAN] Limpiando archivos antiguos...")
         
         # Safety check: only cleanup if output_file exists
         if output_file not in output_files.values():
-            print(f"    ⚠️ SALTANDO limpieza - archivo principal no guardado")
+            print(f"    [WARN] SALTANDO limpieza - archivo principal no guardado")
         elif not output_file.exists():
-            print(f"    ⚠️ SALTANDO limpieza - archivo principal no encontrado: {output_file}")
+            print(f"    [WARN] SALTANDO limpieza - archivo principal no encontrado: {output_file}")
         else:
             count_deleted = 0
-            for f in forecasts_output_base.glob(f"{machine_name}/*.csv"):
-                # CRITICAL: Skip the combined output file
+            # Iterate over ALL csv files in the machine output directory
+            for f in output_file.parent.glob("*.csv"):
+                # CRITICAL: Skip the combined output file we just created
                 if f.resolve() == output_file.resolve():
-                    print(f"    ✓ Conservando: {f.name} (archivo principal)")
+                    print(f"    [OK] Conservando: {f.name} (archivo actual)")
                     continue
                 
-                # Skip FORECAST_ files (should be kept)
-                if f.name.startswith("FORECAST_"):
-                    print(f"    ✓ Conservando: {f.name} (archivo FORECAST)")
-                    continue
-                
-                # Skip EPI forecast files
-                if "DATOS_EPI" in f.name:
-                    print(f"    ✓ Conservando: {f.name} (archivo EPI)")
-                    continue
-                
+                # Delete everything else (old horizons, old dates, partial files, etc.)
                 try:
-                    print(f"    🗑 Eliminando: {f.name}")
+                    print(f"    [DEL] Eliminando: {f.name}")
                     f.unlink()
                     count_deleted += 1
                 except Exception as e:
-                    print(f"    ❌ Error eliminando {f.name}: {e}")
+                    print(f"    [ERROR] Error eliminando {f.name}: {e}")
             
-            print(f"  ✅ Limpieza completa: {count_deleted} archivos eliminados.")
+            print(f"  [OK] Limpieza completa: {count_deleted} archivos eliminados.")
     
     # -------------------------------------------------------------------------
     # Global Cleanup: Ensure all machine folders are clean, even if skipped
@@ -1166,9 +1268,9 @@ def batch_forecast_to_data(
             if f.name.startswith("FORECAST_"):
                 continue
             
-            # Preserve EPI (DATOS_EPI_*.csv)
-            if f.name.startswith("DATOS_EPI"):
-                continue
+            # Preserve EPI (DATOS_EPI_*.csv) - NO, delete them
+            # if f.name.startswith("DATOS_EPI"):
+            #    continue
                 
             # If we just generated this file (it's in output_files), keep it (redundant check but safe)
             if m_name in output_files and f.resolve() == output_files[m_name].resolve():
